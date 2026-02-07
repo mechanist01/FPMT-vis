@@ -1,0 +1,5 @@
+{
+  "name": "FPMT Muscle Activity Visualizer",
+  "description": "A high-fidelity diagnostic dashboard for analyzing muscle forces and pathway ranges from FPMT full-run CSV data. Features interactive heatmaps, real-time playback, and a 2D body intensity visualizer.",
+  "requestFramePermissions": []
+}

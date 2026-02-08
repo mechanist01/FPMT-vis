@@ -1,16 +1,27 @@
 
 import React, { useState, useMemo } from 'react';
-import { FPMTData, SortOrder, MuscleData } from '../types';
-import { Search, Plus, RotateCcw, AlertCircle, TrendingDown } from 'lucide-react';
+import { FPMTData, SortOrder, MuscleData, MuscleCategory } from '../types';
+import { Search, Plus, RotateCcw, AlertCircle, TrendingDown, Activity } from 'lucide-react';
 
 interface MuscleDetailsProps {
   data: FPMTData;
   currentFrameIdx: number;
   caps: Record<string, number>;
   onCapsChange: (caps: Record<string, number>) => void;
+  onAnalyze: (muscle: MuscleData) => void;
+  muscleCategories: Record<string, MuscleCategory>;
+  onCategoryChange: (muscle: string, category: MuscleCategory) => void;
 }
 
-const MuscleDetails: React.FC<MuscleDetailsProps> = ({ data, currentFrameIdx, caps, onCapsChange }) => {
+const MuscleDetails: React.FC<MuscleDetailsProps> = ({ 
+  data, 
+  currentFrameIdx, 
+  caps, 
+  onCapsChange, 
+  onAnalyze,
+  muscleCategories,
+  onCategoryChange
+}) => {
   const [sortOrder, setSortOrder] = useState<SortOrder>(SortOrder.Anatomical);
   const [searchTerm, setSearchTerm] = useState('');
   const [capInput, setCapInput] = useState<{ muscle: string; value: string }>({ muscle: '', value: '' });
@@ -66,14 +77,39 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({ data, currentFrameIdx, ca
     const isCapped = caps[m.name] !== undefined;
     const forcePct = data.maxForce > 0 ? (force / data.maxForce) * 100 : 0;
     const maxWidth = data.maxPathwayWidth > 0 ? data.maxPathwayWidth : 1;
+    const category = muscleCategories[m.name] || 'none';
 
     return (
-      <div key={m.name} className="group flex flex-col gap-0.5 py-1 border-b border-white/[0.02]">
-        <div className="flex justify-between items-baseline gap-1">
-          <span className={`text-[9px] font-bold truncate tracking-tight ${isCapped ? 'text-blue-400' : 'text-slate-300 group-hover:text-white'} transition-colors`}>
-            {m.displayName}
-          </span>
-          <span className="text-[8px] font-mono text-slate-500 font-bold whitespace-nowrap">{force.toFixed(1)}N</span>
+      <div key={m.name} className="group flex flex-col gap-0.5 py-1.5 border-b border-white/[0.02]">
+        <div className="flex justify-between items-center gap-1">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <button 
+              onClick={() => {
+                const cats: MuscleCategory[] = ['none', 'required', 'optional', 'excluded'];
+                const next = cats[(cats.indexOf(category) + 1) % cats.length];
+                onCategoryChange(m.name, next);
+              }}
+              className={`w-2 h-2 rounded-full shrink-0 transition-all ${
+                category === 'required' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' :
+                category === 'optional' ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' :
+                category === 'excluded' ? 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]' :
+                'bg-slate-700'
+              }`}
+            />
+            <span className={`text-[10px] font-bold truncate tracking-tight ${isCapped ? 'text-blue-400' : 'text-slate-300 group-hover:text-white'} transition-colors`}>
+              {m.displayName}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-mono text-slate-500 font-bold whitespace-nowrap">{force.toFixed(1)}N</span>
+            <button 
+              onClick={() => onAnalyze(m)}
+              className="p-1 hover:bg-blue-600/20 text-slate-600 hover:text-blue-400 rounded transition-all group-hover:opacity-100 opacity-0"
+              title="Temporal Analysis"
+            >
+               <Activity size={10} />
+            </button>
+          </div>
         </div>
         
         <div className="h-0.5 w-full bg-slate-900 rounded-full overflow-hidden">
@@ -113,7 +149,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({ data, currentFrameIdx, ca
         <div className="flex items-center justify-between">
            <h3 className="text-[9px] font-black uppercase tracking-[0.2em] text-blue-400 flex items-center gap-2">
              <TrendingDown size={12} />
-             Constraints
+             Constraints & Pathways
            </h3>
            {Object.keys(caps).length > 0 && (
              <button onClick={() => onCapsChange({})} className="text-[8px] font-bold text-slate-500 hover:text-white flex items-center gap-1 uppercase">
@@ -147,7 +183,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({ data, currentFrameIdx, ca
 
         {modifiedData.isInfeasible && (
           <div className="p-1.5 rounded bg-red-900/30 border border-red-500/30 text-[8px] text-red-200 font-bold flex items-center gap-1.5">
-            <AlertCircle size={10} /> INFEASIBLE
+            <AlertCircle size={10} /> INFEASIBLE REGION
           </div>
         )}
       </div>
@@ -158,7 +194,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({ data, currentFrameIdx, ca
             <input 
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Filter..."
+              placeholder="Search anatomy..."
               className="bg-transparent text-[9px] outline-none w-full"
             />
          </div>
@@ -166,7 +202,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({ data, currentFrameIdx, ca
            onClick={() => setSortOrder(sortOrder === SortOrder.Anatomical ? SortOrder.ForceDescending : SortOrder.Anatomical)}
            className="text-[8px] font-black uppercase tracking-tighter text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded"
           >
-            {sortOrder === SortOrder.Anatomical ? 'Anatomy' : 'Force'}
+            {sortOrder === SortOrder.Anatomical ? 'By Region' : 'By Force'}
          </button>
       </div>
       

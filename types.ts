@@ -1,15 +1,19 @@
 
+export type MuscleCategory = 'required' | 'optional' | 'excluded' | 'none';
+
 export interface MuscleData {
   name: string;
   fullName: string;
   displayName: string;
   laterality: 'R' | 'L' | 'Other';
+  category?: MuscleCategory;
 }
 
 export interface FrameData {
   frame: number;
   time: number;
   totalForce: number;
+  status?: string; // e.g., 'feasible', 'infeasible'
   muscleForces: Record<string, number>;
   pathwayLower: Record<string, number>;
   pathwayUpper: Record<string, number>;

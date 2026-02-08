@@ -1,14 +1,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Upload, Activity, Repeat, LayoutGrid, User, Share2, FileText } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Upload, Activity, Repeat, LayoutGrid, User, Share2, FileText, Download, Loader2, Eye, EyeOff, ShieldCheck, AlertCircle, Info } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import { FPMTData, MusclePathData, MOTData } from './types';
+import { FPMTData, MusclePathData, MOTData, MuscleData, MuscleCategory } from './types';
 import { parseFPMTCSV } from './services/csvParser';
 import { parseMOT } from './services/motParser';
 import HeatmapCanvas from './components/HeatmapCanvas';
-import MarkerVisualizer3D from './components/MarkerVisualizer3D';
+import MarkerVisualizer3D, { MarkerVisualizer3DHandle } from './components/MarkerVisualizer3D';
 import MuscleDetails from './components/MuscleDetails';
 import BodyVisualizer from './components/BodyVisualizer';
+import TemporalAnalysisModal from './components/TemporalAnalysisModal';
+import gifshot from 'gifshot';
 
 const App: React.FC = () => {
   const [fpmtData, setFpmtData] = useState<FPMTData | null>(null);
@@ -21,7 +23,20 @@ const App: React.FC = () => {
   const [heatmapMode, setHeatmapMode] = useState<'force' | 'range' | 'normalized'>('force');
   const [muscleCaps, setMuscleCaps] = useState<Record<string, number>>({});
   
+  // Pathway Categorization & Filtering
+  const [muscleCategories, setMuscleCategories] = useState<Record<string, MuscleCategory>>({});
+  const [activeCategoryFilters, setActiveCategoryFilters] = useState<Set<MuscleCategory>>(new Set(['none', 'required', 'optional', 'excluded']));
+  
+  // Analysis Modal State
+  const [selectedMuscleForAnalysis, setSelectedMuscleForAnalysis] = useState<MuscleData | null>(null);
+
+  // Export states
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportPhase, setExportPhase] = useState<'capturing' | 'processing'>('capturing');
+
   const playbackRef = useRef<number | null>(null);
+  const visualizerRef = useRef<MarkerVisualizer3DHandle>(null);
 
   const handleFPMTUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -34,6 +49,103 @@ const App: React.FC = () => {
         setCurrentFrame(0);
       } catch (err) {
         alert("Failed to parse FPMT CSV: " + (err as Error).message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handlePathwayUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!fpmtData) {
+      alert("Please upload the diagnostic FPMT CSV first.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+        if (lines.length < 2) return;
+
+        const headers = lines[0].split(',').map(h => h.trim());
+        const frameIdx = headers.indexOf('frame');
+        const statusIdx = headers.indexOf('status');
+        
+        // Find indices for lower and upper bounds
+        const lowerIndices: Record<string, number> = {};
+        const upperIndices: Record<string, number> = {};
+
+        headers.forEach((h, idx) => {
+          if (h.startsWith('pathway_lower_')) {
+            const mName = h.replace('pathway_lower_', '');
+            // Check if this muscle actually exists in our current dataset
+            const baseName = mName.startsWith('muscle_') ? mName.replace('muscle_', '') : mName;
+            if (fpmtData.muscleNames.some(m => m.name === baseName)) {
+              lowerIndices[baseName] = idx;
+            }
+          }
+          if (h.startsWith('pathway_upper_')) {
+            const mName = h.replace('pathway_upper_', '');
+            const baseName = mName.startsWith('muscle_') ? mName.replace('muscle_', '') : mName;
+            if (fpmtData.muscleNames.some(m => m.name === baseName)) {
+              upperIndices[baseName] = idx;
+            }
+          }
+        });
+
+        // Clone current frames to avoid direct mutation
+        const updatedFrames = fpmtData.frames.map(f => ({
+          ...f,
+          pathwayLower: { ...f.pathwayLower },
+          pathwayUpper: { ...f.pathwayUpper }
+        }));
+
+        let mergeCount = 0;
+        let runningMaxPathwayWidth = 0;
+
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i].split(',');
+          if (cols.length < 2) continue;
+
+          const csvFrameValue = parseInt(cols[frameIdx]);
+          const targetFrame = isNaN(csvFrameValue) ? (i - 1) : csvFrameValue;
+          const frameObj = updatedFrames.find(f => f.frame === targetFrame);
+          
+          if (frameObj) {
+            mergeCount++;
+            if (statusIdx !== -1 && cols[statusIdx]) frameObj.status = cols[statusIdx];
+            
+            Object.entries(lowerIndices).forEach(([m, idx]) => {
+              frameObj.pathwayLower[m] = parseFloat(cols[idx]) || 0;
+            });
+
+            Object.entries(upperIndices).forEach(([m, idx]) => {
+              const upper = parseFloat(cols[idx]) || 0;
+              const lower = frameObj.pathwayLower[m] || 0;
+              frameObj.pathwayUpper[m] = upper;
+              
+              const width = upper - lower;
+              if (width > runningMaxPathwayWidth) runningMaxPathwayWidth = width;
+            });
+          }
+        }
+
+        if (mergeCount === 0) {
+          alert("No matching frames found between files. Ensure the 'frame' column matches.");
+          return;
+        }
+
+        setFpmtData({ 
+          ...fpmtData, 
+          frames: updatedFrames, 
+          maxPathwayWidth: runningMaxPathwayWidth || fpmtData.maxPathwayWidth
+        });
+        
+        setHeatmapMode('range'); 
+        alert(`Successfully merged pathway data for ${mergeCount} frames. Corridors are now active.`);
+      } catch (err) {
+        alert("Failed to parse Pathway CSV: " + (err as Error).message);
       }
     };
     reader.readAsText(file);
@@ -69,6 +181,13 @@ const App: React.FC = () => {
     reader.readAsText(file);
   };
 
+  const toggleCategoryFilter = (cat: MuscleCategory) => {
+    const next = new Set(activeCategoryFilters);
+    if (next.has(cat)) next.delete(cat);
+    else next.add(cat);
+    setActiveCategoryFilters(next);
+  };
+
   const handlePlayPause = () => setIsPlaying(!isPlaying);
   const handleStep = (dir: number) => {
     if (!fpmtData) return;
@@ -86,8 +205,38 @@ const App: React.FC = () => {
     }
   };
 
+  const handleExportGIF = async () => {
+    if (!fpmtData || !visualizerRef.current) return;
+    setIsPlaying(false);
+    setIsExporting(true);
+    setExportPhase('capturing');
+    const images: string[] = [];
+    const totalFrames = fpmtData.frames.length;
+    const step = Math.max(1, Math.ceil(totalFrames / 60));
+    for (let i = 0; i < totalFrames; i += step) {
+      setCurrentFrame(i);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const img = visualizerRef.current.captureFrame();
+      if (img) images.push(img);
+      setExportProgress(Math.round((i / totalFrames) * 100));
+    }
+    setExportPhase('processing');
+    gifshot.createGIF({
+      images: images, gifWidth: 600, gifHeight: 600, interval: 0.1,
+      numFrames: images.length, sampleInterval: 10, numWorkers: 2
+    }, (obj: any) => {
+      if (!obj.error) {
+        const link = document.createElement('a');
+        link.href = obj.image;
+        link.download = `fpmt_biomech_${Date.now()}.gif`;
+        link.click();
+      }
+      setIsExporting(false);
+    });
+  };
+
   useEffect(() => {
-    if (isPlaying && fpmtData) {
+    if (isPlaying && fpmtData && !isExporting) {
       playbackRef.current = window.setInterval(() => {
         setCurrentFrame(prev => {
           if (prev >= fpmtData.frames.length - 1) {
@@ -102,57 +251,57 @@ const App: React.FC = () => {
       if (playbackRef.current) clearInterval(playbackRef.current);
     }
     return () => { if (playbackRef.current) clearInterval(playbackRef.current); };
-  }, [isPlaying, fpmtData, playbackSpeed, isLooping]);
+  }, [isPlaying, fpmtData, playbackSpeed, isLooping, isExporting]);
 
   if (!fpmtData) {
     return (
       <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-950 p-6 overflow-hidden">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(30,58,138,0.1),transparent)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(30,58,138,0.15),transparent)]" />
         <div className="max-w-4xl w-full text-center space-y-12 z-10">
-          <div className="flex justify-center gap-8">
+          <div className="flex justify-center gap-8 animate-in slide-in-from-bottom-8 duration-700">
             <div className="w-24 h-24 bg-blue-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-blue-900/40 transform -rotate-6">
                 <Activity size={48} className="text-white" />
             </div>
             <div className="w-24 h-24 bg-indigo-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-indigo-900/40 transform rotate-6">
-                <User size={48} className="text-white" />
+                <ShieldCheck size={48} className="text-white" />
             </div>
           </div>
           
           <div className="space-y-4">
-            <h1 className="text-6xl font-black tracking-tighter uppercase text-slate-100">FPMT <span className="text-blue-500">DECK</span></h1>
-            <p className="text-xl text-slate-400 font-medium font-mono tracking-tight">Kinetic Anatomy Visualization & Feasibility Analytics.</p>
+            <h1 className="text-6xl font-black tracking-tighter uppercase text-slate-100">FPMT <span className="text-blue-500">PATHWAY</span></h1>
+            <p className="text-xl text-slate-400 font-medium font-mono tracking-tight">Kinetic Anatomy Visualization & Pathway Feasibility Analytics.</p>
           </div>
 
           <div className="grid grid-cols-3 gap-6 max-w-4xl mx-auto w-full">
             <div className="space-y-3">
-               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Diagnostic Stream</h3>
+               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">1. Diagnostic forces</h3>
                <label className="block cursor-pointer group">
                 <input type="file" onChange={handleFPMTUpload} className="hidden" accept=".csv" />
                 <div className="border-2 border-dashed border-slate-800 rounded-2xl p-8 bg-slate-900/50 hover:bg-slate-900 hover:border-blue-500 transition-all shadow-xl group-hover:scale-[1.02]">
                   <Upload className="mx-auto mb-4 text-slate-600 group-hover:text-blue-500" size={32} />
-                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">FPMT CSV</span>
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Upload CSV</span>
                 </div>
                </label>
             </div>
 
             <div className="space-y-3">
-               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Kinematic Model</h3>
+               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">2. Kinematic Model</h3>
                <label className="block cursor-pointer group">
                 <input type="file" onChange={handleMOTUpload} className="hidden" accept=".mot,.sto" />
                 <div className="border-2 border-dashed border-slate-800 rounded-2xl p-8 bg-slate-900/50 hover:bg-slate-900 hover:border-indigo-500 transition-all shadow-xl group-hover:scale-[1.02]">
                   <FileText className="mx-auto mb-4 text-slate-600 group-hover:text-indigo-500" size={32} />
-                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">MOT (Optional)</span>
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Upload MOT</span>
                 </div>
                </label>
             </div>
 
             <div className="space-y-3">
-               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Muscle Geometry</h3>
+               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">3. Geometry</h3>
                <label className="block cursor-pointer group">
                 <input type="file" onChange={handlePathUpload} className="hidden" accept=".json" />
                 <div className="border-2 border-dashed border-slate-800 rounded-2xl p-8 bg-slate-900/50 hover:bg-slate-900 hover:border-emerald-500 transition-all shadow-xl group-hover:scale-[1.02]">
                   <Share2 className="mx-auto mb-4 text-slate-600 group-hover:text-emerald-500" size={32} />
-                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Path JSON</span>
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Upload JSON</span>
                 </div>
                </label>
             </div>
@@ -164,6 +313,27 @@ const App: React.FC = () => {
 
   return (
     <div className="h-screen w-full flex flex-col bg-slate-950 text-slate-200 overflow-hidden font-sans selection:bg-blue-500/30">
+      <TemporalAnalysisModal 
+        isOpen={!!selectedMuscleForAnalysis}
+        onClose={() => setSelectedMuscleForAnalysis(null)}
+        muscle={selectedMuscleForAnalysis}
+        data={fpmtData}
+        currentFrame={currentFrame}
+        onFrameChange={setCurrentFrame}
+      />
+
+      {isExporting && (
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-md">
+           <div className="max-w-md w-full p-8 bg-slate-900 rounded-3xl border border-white/5 shadow-2xl flex flex-col items-center gap-6">
+              <Loader2 className="animate-spin text-blue-500" size={48} />
+              <h2 className="text-xl font-black uppercase tracking-tighter">Encoding Biomechanics...</h2>
+              <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                 <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${exportProgress}%` }} />
+              </div>
+           </div>
+        </div>
+      )}
+
       <header className="h-14 flex items-center justify-between px-6 border-b border-white/5 bg-slate-900/80 backdrop-blur-2xl z-20">
         <div className="flex items-center gap-4">
           <div className="w-8 h-8 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/20">
@@ -172,12 +342,33 @@ const App: React.FC = () => {
           <div>
             <h2 className="text-[11px] font-black uppercase tracking-[0.3em] text-white">Anatomy Diagnostic Deck</h2>
             <p className="text-[9px] text-slate-500 font-mono flex items-center gap-2 uppercase tracking-tighter">
-               <span className="text-blue-500 animate-pulse">● ACTIVE</span> T: {fpmtData.frames[currentFrame].time.toFixed(3)}s | FRAME {currentFrame}
+               <span className="text-blue-500 animate-pulse">● ACTIVE</span> T: {fpmtData.frames[currentFrame].time.toFixed(3)}s | {fpmtData.frames[currentFrame].status?.toUpperCase() || 'READY'}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center bg-slate-950/80 rounded-lg p-1 border border-white/5 gap-1">
+             <span className="text-[7px] font-black uppercase tracking-widest text-slate-500 ml-2 mr-1">Visible Sets:</span>
+             {(['required', 'optional', 'excluded', 'none'] as MuscleCategory[]).map(cat => (
+               <button 
+                key={cat}
+                onClick={() => toggleCategoryFilter(cat)}
+                className={`w-5 h-5 rounded-md flex items-center justify-center transition-all ${
+                  activeCategoryFilters.has(cat) ? 
+                    (cat === 'required' ? 'bg-emerald-500 text-white' :
+                     cat === 'optional' ? 'bg-amber-500 text-white' :
+                     cat === 'excluded' ? 'bg-rose-500 text-white' :
+                     'bg-slate-400 text-slate-900') : 
+                    'bg-slate-800 text-slate-600 opacity-40'
+                }`}
+                title={`Toggle ${cat} visibility`}
+               >
+                 {activeCategoryFilters.has(cat) ? <Eye size={10} /> : <EyeOff size={10} />}
+               </button>
+             ))}
+          </div>
+
           <div className="flex bg-slate-950/80 rounded-lg p-1 border border-white/5">
             {['force', 'normalized', 'range'].map(m => (
               <button 
@@ -190,9 +381,14 @@ const App: React.FC = () => {
             ))}
           </div>
           
-          <button onClick={() => window.location.reload()} className="ml-4 p-2 text-slate-500 hover:text-white transition-colors">
-            <Upload size={18} />
-          </button>
+          <div className="flex items-center gap-2">
+            <label className="cursor-pointer bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 px-3 py-1.5 rounded-lg border border-emerald-500/20 transition-all flex items-center gap-2">
+              <Upload size={14} />
+              <span className="text-[9px] font-black uppercase tracking-widest">Update Pathway</span>
+              <input type="file" onChange={handlePathwayUpload} className="hidden" accept=".csv" />
+            </label>
+            <button onClick={handleExportGIF} className="p-2 text-slate-500 hover:text-blue-400 transition-colors"><Download size={18} /></button>
+          </div>
         </div>
       </header>
 
@@ -200,11 +396,14 @@ const App: React.FC = () => {
         <div className="col-span-3 flex flex-col gap-4 overflow-hidden">
            <div className="flex-1 min-h-0">
              <MarkerVisualizer3D 
+              ref={visualizerRef}
               fpmtData={fpmtData} 
               motData={motData}
               musclePathData={musclePathData}
               currentFrameIdx={currentFrame} 
               mode={heatmapMode} 
+              muscleCategories={muscleCategories}
+              activeCategoryFilters={activeCategoryFilters}
              />
            </div>
            <div className="h-64">
@@ -218,15 +417,26 @@ const App: React.FC = () => {
               <div className="p-3 border-b border-white/5 flex justify-between items-center bg-white/[0.02]">
                 <h3 className="font-black text-[9px] uppercase tracking-[0.2em] flex items-center gap-2 text-slate-400">
                   <LayoutGrid size={12} className="text-blue-500" />
-                  Rolling Detail window
+                  Rolling Diagnostic Window
                 </h3>
+                <div className="flex items-center gap-2">
+                   <span className="text-[7px] text-slate-500 uppercase font-black">Current Mode: {heatmapMode}</span>
+                </div>
               </div>
               <div className="flex-1 p-2">
                  <HeatmapCanvas data={fpmtData} currentFrame={currentFrame} onFrameChange={setCurrentFrame} mode={heatmapMode} />
               </div>
             </div>
             <div className="col-span-7 flex flex-col overflow-hidden">
-              <MuscleDetails data={fpmtData} currentFrameIdx={currentFrame} caps={muscleCaps} onCapsChange={setMuscleCaps} />
+              <MuscleDetails 
+                data={fpmtData} 
+                currentFrameIdx={currentFrame} 
+                caps={muscleCaps} 
+                onCapsChange={setMuscleCaps} 
+                onAnalyze={setSelectedMuscleForAnalysis}
+                muscleCategories={muscleCategories}
+                onCategoryChange={(m, c) => setMuscleCategories(prev => ({ ...prev, [m]: c }))}
+              />
             </div>
           </div>
 
@@ -237,11 +447,7 @@ const App: React.FC = () => {
              </div>
              <div className="flex-1">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart 
-                  data={fpmtData.frames} 
-                  margin={{ top: 0, right: 0, left: -30, bottom: 0 }}
-                  onClick={handleChartClick}
-                >
+                <AreaChart data={fpmtData.frames} margin={{ top: 0, right: 0, left: -30, bottom: 0 }} onClick={handleChartClick}>
                   <defs>
                     <linearGradient id="colorForce" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4}/>
@@ -251,10 +457,7 @@ const App: React.FC = () => {
                   <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
                   <XAxis dataKey="frame" hide />
                   <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 7, fill: '#475569' }} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#0f172a', border: 'none', borderRadius: '8px', fontSize: '8px' }}
-                    labelStyle={{ color: '#94a3b8' }}
-                  />
+                  <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: 'none', borderRadius: '8px', fontSize: '8px' }} />
                   <Area type="monotone" dataKey="totalForce" stroke="#3b82f6" fillOpacity={1} fill="url(#colorForce)" strokeWidth={1.5} isAnimationActive={false} />
                   <ReferenceLine x={fpmtData.frames[currentFrame].frame} stroke="#ffffff" strokeWidth={1} strokeDasharray="3 3" />
                 </AreaChart>
@@ -265,10 +468,16 @@ const App: React.FC = () => {
       </main>
 
       <footer className="h-16 bg-slate-900/95 backdrop-blur-3xl border-t border-white/5 flex items-center justify-between px-8 z-30">
-        <div className="flex-1 flex items-center gap-8">
+        <div className="flex items-center gap-12">
            <div className="flex flex-col">
               <span className="text-[7px] font-black text-slate-500 uppercase tracking-widest">Sim Clock</span>
               <span className="text-lg font-mono text-white font-black">{fpmtData.frames[currentFrame].time.toFixed(4)}s</span>
+           </div>
+           <div className="flex flex-col">
+              <span className="text-[7px] font-black text-slate-500 uppercase tracking-widest">Status</span>
+              <span className={`text-[10px] font-black uppercase tracking-widest ${fpmtData.frames[currentFrame].status?.toLowerCase() === 'feasible' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {fpmtData.frames[currentFrame].status || 'Ready'}
+              </span>
            </div>
         </div>
 
@@ -278,28 +487,19 @@ const App: React.FC = () => {
               <Repeat size={16} />
             </button>
             <div className="w-[1px] h-4 bg-white/5 mx-1" />
-            <button onClick={() => handleStep(-1)} className="p-1.5 text-slate-400 hover:text-white transition-all transform hover:scale-110 active:scale-95">
-              <SkipBack size={18} fill="currentColor" />
-            </button>
+            <button onClick={() => handleStep(-1)} className="p-1.5 text-slate-400 hover:text-white transition-all transform hover:scale-110 active:scale-95"><SkipBack size={18} fill="currentColor" /></button>
             <button onClick={handlePlayPause} className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/40 transform hover:scale-105 active:scale-90">
               {isPlaying ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" className="ml-0.5" />}
             </button>
-            <button onClick={() => handleStep(1)} className="p-1.5 text-slate-400 hover:text-white transition-all transform hover:scale-110 active:scale-95">
-              <SkipForward size={18} fill="currentColor" />
-            </button>
+            <button onClick={() => handleStep(1)} className="p-1.5 text-slate-400 hover:text-white transition-all transform hover:scale-110 active:scale-95"><SkipForward size={18} fill="currentColor" /></button>
           </div>
         </div>
 
         <div className="flex-1 flex justify-end items-center gap-4">
           <div className="flex flex-col gap-0.5 items-end">
-            <span className="text-[7px] font-black text-slate-500 uppercase tracking-widest">Velocity</span>
+            <span className="text-[7px] font-black text-slate-500 uppercase tracking-widest">Playback Velocity</span>
             <div className="flex items-center gap-2">
-              <input 
-                type="range" min="0.1" max="3" step="0.1" 
-                value={playbackSpeed} 
-                onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
-                className="w-24 accent-blue-600 h-1 bg-slate-800 rounded-full appearance-none cursor-pointer"
-              />
+              <input type="range" min="0.1" max="3" step="0.1" value={playbackSpeed} onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))} className="w-24 accent-blue-600 h-1 bg-slate-800 rounded-full appearance-none cursor-pointer" />
               <span className="text-[10px] font-mono w-6 text-blue-400 font-black">{playbackSpeed}x</span>
             </div>
           </div>

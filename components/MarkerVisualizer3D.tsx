@@ -1,8 +1,8 @@
 
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useImperativeHandle, forwardRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'https://esm.sh/three@0.170.0/examples/jsm/controls/OrbitControls.js';
-import { FPMTData, MusclePathData, MOTData } from '../types';
+import { FPMTData, MusclePathData, MOTData, MuscleCategory } from '../types';
 import { COLOR_SCALE } from '../constants';
 import * as d3 from 'd3';
 
@@ -12,15 +12,23 @@ interface MarkerVisualizer3DProps {
   musclePathData?: MusclePathData | null;
   currentFrameIdx: number;
   mode: 'force' | 'range' | 'normalized';
+  muscleCategories: Record<string, MuscleCategory>;
+  activeCategoryFilters: Set<MuscleCategory>;
 }
 
-const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({ 
+export interface MarkerVisualizer3DHandle {
+  captureFrame: () => string | null;
+}
+
+const MarkerVisualizer3D = forwardRef<MarkerVisualizer3DHandle, MarkerVisualizer3DProps>(({ 
   fpmtData, 
   motData,
   musclePathData, 
   currentFrameIdx, 
-  mode 
-}) => {
+  mode,
+  muscleCategories,
+  activeCategoryFilters
+}, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -28,6 +36,16 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
   const modelGroupRef = useRef<THREE.Group | null>(null);
 
   const colorInterpolator = d3.interpolateRgbBasis(COLOR_SCALE);
+
+  useImperativeHandle(ref, () => ({
+    captureFrame: () => {
+      if (!rendererRef.current) return null;
+      if (sceneRef.current && cameraRef.current) {
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
+      }
+      return rendererRef.current.domElement.toDataURL('image/png');
+    }
+  }));
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -40,7 +58,11 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
     camera.position.set(0.8, 1.2, 1.2);
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true, 
+      alpha: true,
+      preserveDrawingBuffer: true 
+    });
     renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
     renderer.shadowMap.enabled = true;
     containerRef.current.appendChild(renderer.domElement);
@@ -61,9 +83,6 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
     scene.add(grid);
 
     const modelGroup = new THREE.Group();
-    // OpenSim to Three.js orientation: OpenSim X is forward, Y is up, Z is right.
-    // Standard Three.js Z is forward, Y is up, X is right.
-    // We rotate -90 around Y to make OpenSim X look into -Z.
     modelGroup.rotation.y = -Math.PI / 2;
     scene.add(modelGroup);
     modelGroupRef.current = modelGroup;
@@ -98,16 +117,14 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
     const degToRad = (deg: number) => deg * (Math.PI / 180);
     const frameGroups: Record<string, THREE.Group> = {};
     
-    // Get kinematic values for current frame
     const v = (motData && motData.frames[currentFrameIdx]) 
       ? motData.frames[currentFrameIdx].values 
       : {};
 
-    // 1. Pelvis
     const pelvis = new THREE.Group();
     pelvis.name = "pelvis";
     pelvis.position.set(v['pelvis_tx'] || 0, v['pelvis_ty'] || 0.95, v['pelvis_tz'] || 0);
-    pelvis.rotation.order = 'ZXY'; // OpenSim rotation sequence
+    pelvis.rotation.order = 'ZXY';
     pelvis.rotation.set(
       degToRad(v['pelvis_list'] || 0),
       degToRad(v['pelvis_rotation'] || 0),
@@ -116,14 +133,11 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
     group.add(pelvis);
     frameGroups["pelvis"] = pelvis;
 
-    // 2. Torso
     const torso = new THREE.Group();
     torso.name = "torso";
-    // Torso rotations can be added here if MOT has them (lumbar_extension, etc.)
     pelvis.add(torso);
     frameGroups["torso"] = torso;
 
-    // 3. Legs
     const sides: ('r' | 'l')[] = ['r', 'l'];
     sides.forEach(s => {
       const sideMult = s === 'r' ? 1 : -1;
@@ -163,11 +177,14 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
 
     group.updateMatrixWorld(true);
 
-    // 4. Render Muscle Paths
     if (musclePathData) {
       const frameData = fpmtData.frames[currentFrameIdx];
       
       musclePathData.muscles.forEach(mp => {
+        // Filter by category
+        const category = muscleCategories[mp.muscle] || 'none';
+        if (!activeCategoryFilters.has(category)) return;
+
         const force = frameData.muscleForces[mp.muscle] || 0;
         const upper = frameData.pathwayUpper[mp.muscle] || 0;
         const lower = frameData.pathwayLower[mp.muscle] || 0;
@@ -195,7 +212,6 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
 
         if (points.length > 1) {
           const curve = new THREE.CatmullRomCurve3(points);
-          // Slightly dynamic tube thickness based on intensity
           const tubeGeom = new THREE.TubeGeometry(curve, 12, 0.003 + (intensity * 0.01), 6, false);
           const matColor = colorInterpolator(intensity);
           const mat = new THREE.MeshPhongMaterial({ 
@@ -210,7 +226,7 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
         }
       });
     }
-  }, [currentFrameIdx, musclePathData, fpmtData, motData, mode]);
+  }, [currentFrameIdx, musclePathData, fpmtData, motData, mode, muscleCategories, activeCategoryFilters]);
 
   return (
     <div className="flex flex-col h-full bg-slate-900 rounded-xl overflow-hidden border border-slate-800 shadow-2xl relative">
@@ -226,6 +242,6 @@ const MarkerVisualizer3D: React.FC<MarkerVisualizer3DProps> = ({
        <div ref={containerRef} className="w-full h-full" />
     </div>
   );
-};
+});
 
 export default MarkerVisualizer3D;

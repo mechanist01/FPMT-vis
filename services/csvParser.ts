@@ -36,19 +36,12 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
   const timeIdx = headers.indexOf('time');
   
   const muscleIndices: { name: string; idx: number; fullName: string }[] = [];
-  const pathwayLowerIndices: { name: string; idx: number }[] = [];
-  const pathwayUpperIndices: { name: string; idx: number }[] = [];
 
   headers.forEach((h, idx) => {
+    // STRICT RULE: Only headers starting with 'muscle_' are considered force columns.
     if (h.startsWith('muscle_')) {
       const name = h.replace('muscle_', '');
       muscleIndices.push({ name, idx, fullName: h });
-    } else if (h.startsWith('pathway_lower_')) {
-      const name = h.replace('pathway_lower_', '');
-      pathwayLowerIndices.push({ name, idx });
-    } else if (h.startsWith('pathway_upper_')) {
-      const name = h.replace('pathway_upper_', '');
-      pathwayUpperIndices.push({ name, idx });
     }
   });
 
@@ -75,17 +68,16 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
 
   const frames: FrameData[] = [];
   let globalMaxForce = 0;
-  let globalMaxPathwayWidth = 0;
 
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(',');
-    const frame = parseInt(cols[frameIdx]) || 0;
+    if (cols.length < headers.length) continue;
+
+    const frame = parseInt(cols[frameIdx]) || (i - 1);
     const time = parseFloat(cols[timeIdx]) || 0;
     
     let totalForce = 0;
     const muscleForces: Record<string, number> = {};
-    const pathwayLower: Record<string, number> = {};
-    const pathwayUpper: Record<string, number> = {};
 
     muscleIndices.forEach(m => {
       const force = parseFloat(cols[m.idx]) || 0;
@@ -94,23 +86,14 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
       if (force > globalMaxForce) globalMaxForce = force;
     });
 
-    pathwayLowerIndices.forEach(p => {
-      pathwayLower[p.name] = parseFloat(cols[p.idx]) || 0;
-    });
-
-    pathwayUpperIndices.forEach(p => {
-      pathwayUpper[p.name] = parseFloat(cols[p.idx]) || 0;
-      const width = pathwayUpper[p.name] - (pathwayLower[p.name] || 0);
-      if (width > globalMaxPathwayWidth) globalMaxPathwayWidth = width;
-    });
-
     frames.push({
       frame,
       time,
       totalForce,
+      status: headers.includes('status') ? cols[headers.indexOf('status')] : undefined,
       muscleForces,
-      pathwayLower,
-      pathwayUpper
+      pathwayLower: {},
+      pathwayUpper: {}
     });
   }
 
@@ -118,6 +101,6 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
     frames,
     muscleNames,
     maxForce: globalMaxForce,
-    maxPathwayWidth: globalMaxPathwayWidth
+    maxPathwayWidth: 0 // Initialized as 0 until Pathway CSV is merged
   };
 };

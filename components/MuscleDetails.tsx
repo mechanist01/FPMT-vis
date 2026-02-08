@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { FPMTData, SortOrder, MuscleData, MuscleCategory } from '../types';
-import { Search, Plus, RotateCcw, AlertCircle, TrendingDown, Activity } from 'lucide-react';
+import { Search, Plus, RotateCcw, AlertCircle, TrendingDown, Activity, Info } from 'lucide-react';
 
 interface MuscleDetailsProps {
   data: FPMTData;
@@ -24,6 +24,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
 }) => {
   const [sortOrder, setSortOrder] = useState<SortOrder>(SortOrder.Anatomical);
   const [searchTerm, setSearchTerm] = useState('');
+  const [showLegend, setShowLegend] = useState(false);
   const [capInput, setCapInput] = useState<{ muscle: string; value: string }>({ muscle: '', value: '' });
   
   const currentFrame = data.frames[currentFrameIdx];
@@ -76,8 +77,10 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
 
     const isCapped = caps[m.name] !== undefined;
     const forcePct = data.maxForce > 0 ? (force / data.maxForce) * 100 : 0;
-    const maxWidth = data.maxPathwayWidth > 0 ? data.maxPathwayWidth : 1;
+    const maxWidth = data.maxPathwayWidth > 0 ? data.maxPathwayWidth : (data.maxForce || 1);
     const category = muscleCategories[m.name] || 'none';
+    
+    const isOutOfCorridor = force > origUpper || force < origLower;
 
     return (
       <div key={m.name} className="group flex flex-col gap-0.5 py-1.5 border-b border-white/[0.02]">
@@ -96,7 +99,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
                 'bg-slate-700'
               }`}
             />
-            <span className={`text-[10px] font-bold truncate tracking-tight ${isCapped ? 'text-blue-400' : 'text-slate-300 group-hover:text-white'} transition-colors`}>
+            <span className={`text-[10px] font-bold truncate tracking-tight ${isOutOfCorridor && origUpper > 0 ? 'text-rose-400' : isCapped ? 'text-blue-400' : 'text-slate-300 group-hover:text-white'} transition-colors`}>
               {m.displayName}
             </span>
           </div>
@@ -105,7 +108,6 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
             <button 
               onClick={() => onAnalyze(m)}
               className="p-1 hover:bg-blue-600/20 text-slate-600 hover:text-blue-400 rounded transition-all group-hover:opacity-100 opacity-0"
-              title="Temporal Analysis"
             >
                <Activity size={10} />
             </button>
@@ -119,23 +121,24 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
           />
         </div>
 
-        <div className="relative h-1.5 bg-slate-900/40 rounded-sm overflow-hidden mt-0.5">
+        <div className="relative h-1.5 bg-slate-800 rounded-sm overflow-hidden mt-0.5 border border-white/5">
+          {/* Theoretical range bg */}
+          <div className="absolute inset-0 bg-slate-950/40" />
+          
+          {/* Feasible Corridor */}
+          {origUpper > 0 && (
+             <div 
+              className={`absolute h-full ${isOutOfCorridor ? 'bg-rose-500/20' : 'bg-emerald-500/20'} border-x border-emerald-500/40`}
+              style={{
+                left: `${(origLower / maxWidth) * 100}%`,
+                width: `${((origUpper - origLower) / maxWidth) * 100}%`
+              }}
+            />
+          )}
+
+          {/* Actual Force Cursor */}
           <div 
-            className="absolute h-full bg-slate-700/20"
-            style={{
-              left: `${(origLower / maxWidth) * 100}%`,
-              width: `${((origUpper - origLower) / maxWidth) * 100}%`
-            }}
-          />
-          <div 
-            className={`absolute h-full ${modifiedData.isInfeasible ? 'bg-red-500/20' : 'bg-emerald-500/20'} border-x border-emerald-500/40`}
-            style={{
-              left: `${(cappedLower / maxWidth) * 100}%`,
-              width: `${(Math.max(0, cappedUpper - cappedLower) / maxWidth) * 100}%`
-            }}
-          />
-          <div 
-            className="absolute h-full w-[1px] bg-white/60 z-10"
+            className="absolute h-full w-[2px] bg-white z-10 shadow-[0_0_5px_rgba(255,255,255,0.5)]"
             style={{ left: `${(force / maxWidth) * 100}%` }}
           />
         </div>
@@ -149,14 +152,33 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
         <div className="flex items-center justify-between">
            <h3 className="text-[9px] font-black uppercase tracking-[0.2em] text-blue-400 flex items-center gap-2">
              <TrendingDown size={12} />
-             Constraints & Pathways
+             Corridors & Constraints
            </h3>
-           {Object.keys(caps).length > 0 && (
-             <button onClick={() => onCapsChange({})} className="text-[8px] font-bold text-slate-500 hover:text-white flex items-center gap-1 uppercase">
-               <RotateCcw size={8} /> Reset
+           <div className="flex items-center gap-2">
+             <button 
+              onMouseEnter={() => setShowLegend(true)}
+              onMouseLeave={() => setShowLegend(false)}
+              className="text-slate-500 hover:text-white"
+             >
+               <Info size={12} />
              </button>
-           )}
+             {Object.keys(caps).length > 0 && (
+               <button onClick={() => onCapsChange({})} className="text-[8px] font-bold text-slate-500 hover:text-white flex items-center gap-1 uppercase">
+                 <RotateCcw size={8} /> Reset
+               </button>
+             )}
+           </div>
         </div>
+
+        {showLegend && (
+          <div className="p-2 bg-slate-900 border border-blue-500/30 rounded text-[8px] space-y-1 animate-in fade-in slide-in-from-top-1">
+            <p className="text-slate-300 font-bold uppercase mb-1">Visualization Guide:</p>
+            <div className="flex items-center gap-2"><div className="w-2 h-2 bg-emerald-500/40 border-x border-emerald-500/50" /> <span>Feasible Pathway Corridor</span></div>
+            <div className="flex items-center gap-2"><div className="w-2 h-2 bg-white" /> <span>Current Calculated Force</span></div>
+            <div className="flex items-center gap-2"><div className="w-2 h-2 bg-slate-800" /> <span>Theoretical Maximum Range</span></div>
+            <p className="text-rose-400 font-medium">Red text indicates muscle is out of its feasible corridor.</p>
+          </div>
+        )}
 
         <div className="flex gap-1">
           <select 
@@ -164,7 +186,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
             onChange={(e) => setCapInput({...capInput, muscle: e.target.value})}
             className="flex-1 bg-slate-800 text-[9px] border border-slate-700 rounded px-1.5 py-1 outline-none"
           >
-            <option value="">Limit Muscle...</option>
+            <option value="">Apply Virtual Limit...</option>
             {data.muscleNames.map(m => (
               <option key={m.name} value={m.name}>{m.displayName}</option>
             ))}
@@ -183,7 +205,7 @@ const MuscleDetails: React.FC<MuscleDetailsProps> = ({
 
         {modifiedData.isInfeasible && (
           <div className="p-1.5 rounded bg-red-900/30 border border-red-500/30 text-[8px] text-red-200 font-bold flex items-center gap-1.5">
-            <AlertCircle size={10} /> INFEASIBLE REGION
+            <AlertCircle size={10} /> CONSTRAINT VIOLATED
           </div>
         )}
       </div>

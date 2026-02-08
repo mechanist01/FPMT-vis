@@ -34,12 +34,21 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
   
   const frameIdx = headers.indexOf('frame');
   const timeIdx = headers.indexOf('time');
+  const statusIdx = headers.indexOf('status');
   
   const muscleIndices: { name: string; idx: number; fullName: string }[] = [];
 
   headers.forEach((h, idx) => {
+    const lowerHeader = h.toLowerCase();
+    
+    // Explicit exclusions for torques, reserves, and contacts
+    const isJunk = lowerHeader.includes('tau_') || 
+                   lowerHeader.includes('actuator_') || 
+                   lowerHeader.includes('contact_') ||
+                   lowerHeader.includes('reserve');
+
     // STRICT RULE: Only headers starting with 'muscle_' are considered force columns.
-    if (h.startsWith('muscle_')) {
+    if (h.startsWith('muscle_') && !isJunk) {
       const name = h.replace('muscle_', '');
       muscleIndices.push({ name, idx, fullName: h });
     }
@@ -90,7 +99,7 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
       frame,
       time,
       totalForce,
-      status: headers.includes('status') ? cols[headers.indexOf('status')] : undefined,
+      status: statusIdx !== -1 ? cols[statusIdx] : undefined,
       muscleForces,
       pathwayLower: {},
       pathwayUpper: {}
@@ -101,6 +110,6 @@ export const parseFPMTCSV = (csvText: string): FPMTData => {
     frames,
     muscleNames,
     maxForce: globalMaxForce,
-    maxPathwayWidth: 0 // Initialized as 0 until Pathway CSV is merged
+    maxPathwayWidth: 0
   };
 };
